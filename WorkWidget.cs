@@ -4,12 +4,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using Microsoft.Win32;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -30,20 +32,64 @@ internal sealed class Settings
     public double AnnualSalary { get; set; }
     public double WorkHoursPerDay { get; set; }
     public double WorkDaysPerYear { get; set; }
+    public int WorkDaysYear { get; set; }
     public bool Topmost { get; set; }
     public bool EarningsCollapsed { get; set; }
+    public string ThemeMode { get; set; }
+    public string LunchStartTime { get; set; }
+    public string LunchEndTime { get; set; }
 
     public static Settings Defaults()
     {
+        int year = DateTime.Today.Year;
         return new Settings
         {
             AnnualSalary = 0,
             WorkHoursPerDay = 9.0,
-            WorkDaysPerYear = 260,
+            WorkDaysPerYear = CountWeekdays(year),
+            WorkDaysYear = year,
             Topmost = true,
-            EarningsCollapsed = true
+            EarningsCollapsed = true,
+            ThemeMode = "system",
+            LunchStartTime = "12:00",
+            LunchEndTime = "13:00"
         };
     }
+
+    public static int CountWeekdays(int year)
+    {
+        int days = 0;
+        DateTime day = new DateTime(year, 1, 1);
+        while (day.Year == year)
+        {
+            if (day.DayOfWeek != DayOfWeek.Saturday && day.DayOfWeek != DayOfWeek.Sunday)
+            {
+                days++;
+            }
+            day = day.AddDays(1);
+        }
+        return days;
+    }
+}
+
+internal sealed class ThemePalette
+{
+    public string ShellBackground { get; set; }
+    public string Border { get; set; }
+    public string Line { get; set; }
+    public string PrimaryText { get; set; }
+    public string SecondaryText { get; set; }
+    public string MutedText { get; set; }
+    public string IncomeText { get; set; }
+    public string Icon { get; set; }
+    public string InputBackground { get; set; }
+    public string ButtonBackground { get; set; }
+    public string ButtonHover { get; set; }
+    public string ButtonPressed { get; set; }
+    public string SaveBackground { get; set; }
+    public string SaveHover { get; set; }
+    public string SavePressed { get; set; }
+    public string SaveText { get; set; }
 }
 
 internal sealed class AttendanceRecord
@@ -73,21 +119,30 @@ internal sealed class WorkWidgetWindow : Window
     private bool departureAlarmShown;
     private DateTime departureAlarmDate;
 
+    private readonly List<FrameworkElement> themedElements = new List<FrameworkElement>();
+    private Border shell;
     private TextBlock startTimeText;
     private TextBlock endTimeText;
     private TextBlock earnedText;
     private Grid earningsExpandedPanel;
     private Button earningsToggleButton;
+    private Button settingsButton;
+    private Button closeButton;
+    private Button cancelButton;
+    private Button saveButton;
     private Border settingsPanel;
     private TextBox startTimeBox;
     private TextBox salaryBox;
     private TextBox hoursBox;
     private TextBox daysBox;
+    private TextBox lunchStartBox;
+    private TextBox lunchEndBox;
     private CheckBox topmostBox;
+    private ComboBox themeBox;
 
     private const double ExpandedHeightValue = 188;
     private const double CollapsedHeightValue = 150;
-    private const double SettingsHeightValue = 316;
+    private const double SettingsHeightValue = 424;
 
     public WorkWidgetWindow()
     {
@@ -96,6 +151,7 @@ internal sealed class WorkWidgetWindow : Window
         iconPath = Path.Combine(baseDir, "assets", "work-widget.ico");
 
         settings = ReadSettings();
+        EnsureWorkDaysForCurrentYear();
         settings.EarningsCollapsed = true;
         detectedLoginTime = GetSessionLoginTime();
         attendance = GetAttendanceRecord(detectedLoginTime, settings.WorkHoursPerDay);
@@ -103,6 +159,7 @@ internal sealed class WorkWidgetWindow : Window
         expectedEndTime = attendance.ExpectedEndTime;
 
         BuildUi();
+        ApplyTheme();
         if (File.Exists(iconPath))
         {
             Icon = BitmapFrame.Create(new Uri(iconPath));
@@ -139,14 +196,12 @@ internal sealed class WorkWidgetWindow : Window
         Topmost = settings.Topmost;
         ShowInTaskbar = true;
 
-        Border shell = new Border
+        shell = Theme(new Border
         {
             CornerRadius = new CornerRadius(12),
             BorderThickness = new Thickness(1),
-            BorderBrush = BrushFrom("#C4CCD6"),
-            Background = BrushFrom("#F8FAFC"),
             SnapsToDevicePixels = true
-        };
+        }, "Shell");
         Content = shell;
 
         Grid root = new Grid();
@@ -165,17 +220,16 @@ internal sealed class WorkWidgetWindow : Window
         Grid.SetRow(title, 0);
         root.Children.Add(title);
 
-        title.Children.Add(new TextBlock
+        title.Children.Add(Theme(new TextBlock
         {
             Text = "근무 위젯",
             Margin = new Thickness(16, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             FontSize = 14,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = BrushFrom("#0F172A")
-        });
+            FontWeight = FontWeights.SemiBold
+        }, "PrimaryText"));
 
-        Button settingsButton = IconButton(null, "설정");
+        settingsButton = IconButton(null, "설정");
         settingsButton.Content = OptionsIcon();
         settingsButton.Click += delegate
         {
@@ -186,7 +240,7 @@ internal sealed class WorkWidgetWindow : Window
         Grid.SetColumn(settingsButton, 1);
         title.Children.Add(settingsButton);
 
-        Button closeButton = IconButton(null, "닫기");
+        closeButton = IconButton(null, "닫기");
         closeButton.Content = CloseIcon();
         closeButton.Click += delegate { Close(); };
         Grid.SetColumn(closeButton, 2);
@@ -202,7 +256,7 @@ internal sealed class WorkWidgetWindow : Window
         root.Children.Add(times);
 
         AddTimeColumn(times, "출근 시간", out startTimeText, 0);
-        Border divider = new Border { Background = BrushFrom("#CBD5E1"), Margin = new Thickness(0, 12, 0, 12) };
+        Border divider = Theme(new Border { Margin = new Thickness(0, 12, 0, 12) }, "Line");
         Grid.SetColumn(divider, 1);
         times.Children.Add(divider);
         AddTimeColumn(times, "예상 퇴근 시간", out endTimeText, 2);
@@ -220,9 +274,9 @@ internal sealed class WorkWidgetWindow : Window
             Margin = new Thickness(18, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             FontSize = 24,
-            FontWeight = FontWeights.Bold,
-            Foreground = BrushFrom("#15803D")
+            FontWeight = FontWeights.Bold
         };
+        Theme(earnedText, "IncomeText");
         earningsExpandedPanel.Children.Add(earnedText);
         earningsToggleButton = IconButton(null, "수입 접기/펼치기");
         earningsToggleButton.Width = 32;
@@ -244,14 +298,12 @@ internal sealed class WorkWidgetWindow : Window
 
     private void BuildSettingsPanel(Grid root)
     {
-        settingsPanel = new Border
+        settingsPanel = Theme(new Border
         {
             CornerRadius = new CornerRadius(12),
             BorderThickness = new Thickness(1),
-            BorderBrush = BrushFrom("#C4CCD6"),
-            Background = BrushFrom("#F8FAFC"),
             Visibility = Visibility.Collapsed
-        };
+        }, "Shell");
         Grid.SetRowSpan(settingsPanel, 5);
         Panel.SetZIndex(settingsPanel, 20);
         root.Children.Add(settingsPanel);
@@ -263,75 +315,101 @@ internal sealed class WorkWidgetWindow : Window
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
         grid.RowDefinitions.Add(new RowDefinition());
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
 
         Grid header = new Grid { Background = Brushes.Transparent };
         header.MouseLeftButtonDown += DragWindow;
         grid.Children.Add(header);
-        header.Children.Add(new TextBlock
+        header.Children.Add(Theme(new TextBlock
         {
             Text = "설정",
             FontSize = 16,
             FontWeight = FontWeights.SemiBold,
-            Foreground = BrushFrom("#0F172A"),
             VerticalAlignment = VerticalAlignment.Center
-        });
+        }, "PrimaryText"));
 
         startTimeBox = AddSettingRow(grid, "출근시간", 1);
         salaryBox = AddSettingRow(grid, "연봉", 2);
         hoursBox = AddSettingRow(grid, "하루 근무시간", 3);
         daysBox = AddSettingRow(grid, "연 근무일수", 4);
+        lunchStartBox = AddSettingRow(grid, "점심 시작", 5);
+        lunchEndBox = AddSettingRow(grid, "점심 종료", 6);
+        themeBox = AddThemeRow(grid, 7);
 
         topmostBox = new CheckBox
         {
             Content = "항상 위에 표시",
             VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(0, 8, 0, 0),
-            Foreground = BrushFrom("#334155")
         };
-        Grid.SetRow(topmostBox, 5);
+        Theme(topmostBox, "SecondaryText");
+        Grid.SetRow(topmostBox, 8);
         grid.Children.Add(topmostBox);
 
         StackPanel buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        Grid.SetRow(buttons, 6);
+        Grid.SetRow(buttons, 9);
         grid.Children.Add(buttons);
-        Button cancel = new Button { Content = "취소", Width = 72, Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand };
-        cancel.Template = CreateTextButtonTemplate("#F8FAFC", "#E2E8F0", "#CBD5E1", "#CBD5E1", "#334155");
-        cancel.Click += delegate
+        cancelButton = new Button { Content = "취소", Width = 72, Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand };
+        cancelButton.Click += delegate
         {
             settingsPanel.Visibility = Visibility.Collapsed;
             ApplyEarningsVisibility();
         };
-        buttons.Children.Add(cancel);
+        buttons.Children.Add(cancelButton);
 
-        Button save = new Button
+        saveButton = new Button
         {
             Content = "저장",
             Width = 72,
             Cursor = Cursors.Hand
         };
-        save.Template = CreateTextButtonTemplate("#0F172A", "#1E293B", "#334155", "#0F172A", "#FFFFFF");
-        save.Click += delegate { SaveSettingsFromUi(); };
-        buttons.Children.Add(save);
+        saveButton.Click += delegate { SaveSettingsFromUi(); };
+        buttons.Children.Add(saveButton);
     }
 
     private TextBox AddSettingRow(Grid grid, string label, int row)
     {
-        TextBlock text = new TextBlock
+        TextBlock text = Theme(new TextBlock
         {
             Text = label,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = BrushFrom("#334155")
-        };
+            VerticalAlignment = VerticalAlignment.Center
+        }, "SecondaryText");
         Grid.SetRow(text, row);
         grid.Children.Add(text);
 
-        TextBox box = new TextBox
+        TextBox box = Theme(new TextBox
         {
             Margin = new Thickness(108, 3, 0, 3),
             Padding = new Thickness(8, 4, 8, 4)
-        };
+        }, "Input");
+        Grid.SetRow(box, row);
+        grid.Children.Add(box);
+        return box;
+    }
+
+    private ComboBox AddThemeRow(Grid grid, int row)
+    {
+        TextBlock text = Theme(new TextBlock
+        {
+            Text = "화면 모드",
+            VerticalAlignment = VerticalAlignment.Center
+        }, "SecondaryText");
+        Grid.SetRow(text, row);
+        grid.Children.Add(text);
+
+        ComboBox box = Theme(new ComboBox
+        {
+            Margin = new Thickness(108, 3, 0, 3),
+            Padding = new Thickness(6, 2, 6, 2),
+            Cursor = Cursors.Hand
+        }, "Input");
+        box.Items.Add(new ComboBoxItem { Content = "시스템", Tag = "system" });
+        box.Items.Add(new ComboBoxItem { Content = "라이트", Tag = "light" });
+        box.Items.Add(new ComboBoxItem { Content = "다크", Tag = "dark" });
         Grid.SetRow(box, row);
         grid.Children.Add(box);
         return box;
@@ -342,27 +420,25 @@ internal sealed class WorkWidgetWindow : Window
         StackPanel panel = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         Grid.SetColumn(panel, column);
         parent.Children.Add(panel);
-        panel.Children.Add(new TextBlock
+        panel.Children.Add(Theme(new TextBlock
         {
             Text = caption,
             TextAlignment = TextAlignment.Center,
-            FontSize = 12,
-            Foreground = BrushFrom("#64748B")
-        });
-        value = new TextBlock
+            FontSize = 12
+        }, "MutedText"));
+        value = Theme(new TextBlock
         {
             TextAlignment = TextAlignment.Center,
             FontSize = 20,
             FontWeight = FontWeights.SemiBold,
-            Foreground = BrushFrom("#0F172A"),
             Margin = new Thickness(0, 4, 0, 0)
-        };
+        }, "PrimaryText");
         panel.Children.Add(value);
     }
 
     private void AddLine(Grid root, int row)
     {
-        Border line = new Border { Background = BrushFrom("#CBD5E1") };
+        Border line = Theme(new Border(), "Line");
         Grid.SetRow(line, row);
         root.Children.Add(line);
     }
@@ -376,10 +452,10 @@ internal sealed class WorkWidgetWindow : Window
             Background = Brushes.Transparent,
             BorderBrush = Brushes.Transparent,
             BorderThickness = new Thickness(0),
-            Foreground = BrushFrom("#334155"),
             Cursor = Cursors.Hand,
             ToolTip = tooltip
         };
+        Theme(button, "IconButton");
         button.Padding = new Thickness(0);
         button.HorizontalContentAlignment = HorizontalAlignment.Center;
         button.VerticalContentAlignment = VerticalAlignment.Center;
@@ -389,6 +465,7 @@ internal sealed class WorkWidgetWindow : Window
 
     private ControlTemplate CreateIconButtonTemplate()
     {
+        ThemePalette palette = CurrentPalette();
         FrameworkElementFactory grid = new FrameworkElementFactory(typeof(Grid));
         grid.SetValue(Grid.BackgroundProperty, Brushes.Transparent);
 
@@ -412,11 +489,11 @@ internal sealed class WorkWidgetWindow : Window
         template.VisualTree = grid;
 
         Trigger over = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-        over.Setters.Add(new Setter(Border.BackgroundProperty, BrushFrom("#E2E8F0"), "HoverBackground"));
+        over.Setters.Add(new Setter(Border.BackgroundProperty, BrushFrom(palette.ButtonHover), "HoverBackground"));
         template.Triggers.Add(over);
 
         Trigger pressed = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
-        pressed.Setters.Add(new Setter(Border.BackgroundProperty, BrushFrom("#CBD5E1"), "HoverBackground"));
+        pressed.Setters.Add(new Setter(Border.BackgroundProperty, BrushFrom(palette.ButtonPressed), "HoverBackground"));
         template.Triggers.Add(pressed);
 
         return template;
@@ -429,7 +506,7 @@ internal sealed class WorkWidgetWindow : Window
             Width = 10,
             Height = 6,
             Stretch = Stretch.Uniform,
-            Stroke = BrushFrom("#334155"),
+            Stroke = BrushFrom(CurrentPalette().PrimaryText),
             StrokeThickness = 1.7,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
@@ -444,7 +521,7 @@ internal sealed class WorkWidgetWindow : Window
         Grid grid = new Grid { Width = 10, Height = 10 };
         grid.Children.Add(new System.Windows.Shapes.Path
         {
-            Stroke = BrushFrom("#64748B"),
+            Stroke = BrushFrom(CurrentPalette().MutedText),
             StrokeThickness = 1.5,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
@@ -452,7 +529,7 @@ internal sealed class WorkWidgetWindow : Window
         });
         grid.Children.Add(new System.Windows.Shapes.Path
         {
-            Stroke = BrushFrom("#64748B"),
+            Stroke = BrushFrom(CurrentPalette().MutedText),
             StrokeThickness = 1.5,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
@@ -464,7 +541,8 @@ internal sealed class WorkWidgetWindow : Window
     private UIElement OptionsIcon()
     {
         Canvas grid = new Canvas { Width = 16, Height = 16 };
-        Brush fill = BrushFrom("#B6BBCB");
+        ThemePalette palette = CurrentPalette();
+        Brush fill = BrushFrom(palette.Icon);
 
         grid.Children.Add(new System.Windows.Shapes.Ellipse
         {
@@ -479,7 +557,7 @@ internal sealed class WorkWidgetWindow : Window
         {
             Width = 3.4,
             Height = 3.4,
-            Fill = BrushFrom("#F8FAFC")
+            Fill = BrushFrom(palette.ShellBackground)
         });
         Canvas.SetLeft(grid.Children[1], 6.3);
         Canvas.SetTop(grid.Children[1], 6.3);
@@ -551,11 +629,13 @@ internal sealed class WorkWidgetWindow : Window
 
     private void UpdateWidget()
     {
+        EnsureWorkDaysForCurrentYear();
         double hoursPerDay = Math.Max(0.1, settings.WorkHoursPerDay);
+        double paidHoursPerDay = CalculatePaidHoursPerDay(hoursPerDay);
         double daysPerYear = Math.Max(1, settings.WorkDaysPerYear);
         double salary = Math.Max(0, settings.AnnualSalary);
-        double elapsedSeconds = Math.Max(0, (DateTime.Now - loginTime).TotalSeconds);
-        double earned = elapsedSeconds * salary / (daysPerYear * hoursPerDay * 3600);
+        double paidSeconds = CalculatePaidSeconds(loginTime, DateTime.Now);
+        double earned = paidSeconds * salary / (daysPerYear * paidHoursPerDay * 3600);
 
         startTimeText.Text = loginTime.ToString("HH:mm");
         endTimeText.Text = expectedEndTime.ToString("HH:mm");
@@ -593,7 +673,10 @@ internal sealed class WorkWidgetWindow : Window
         salaryBox.Text = settings.AnnualSalary.ToString("N0", CultureInfo.GetCultureInfo("ko-KR"));
         hoursBox.Text = settings.WorkHoursPerDay.ToString("0.##", CultureInfo.InvariantCulture);
         daysBox.Text = settings.WorkDaysPerYear.ToString("0", CultureInfo.InvariantCulture);
+        lunchStartBox.Text = settings.LunchStartTime;
+        lunchEndBox.Text = settings.LunchEndTime;
         topmostBox.IsChecked = settings.Topmost;
+        SelectTheme(settings.ThemeMode);
     }
 
     private void SaveSettingsFromUi()
@@ -601,7 +684,11 @@ internal sealed class WorkWidgetWindow : Window
         settings.AnnualSalary = ParseDouble(salaryBox.Text, 0);
         settings.WorkHoursPerDay = Math.Max(0.1, ParseDouble(hoursBox.Text, 9));
         settings.WorkDaysPerYear = Math.Max(1, ParseDouble(daysBox.Text, 260));
+        settings.WorkDaysYear = DateTime.Today.Year;
         settings.Topmost = topmostBox.IsChecked == true;
+        settings.ThemeMode = SelectedThemeMode();
+        settings.LunchStartTime = NormalizeTimeText(lunchStartBox.Text, settings.LunchStartTime);
+        settings.LunchEndTime = NormalizeTimeText(lunchEndBox.Text, settings.LunchEndTime);
 
         loginTime = ParseTimeOnToday(startTimeBox.Text, loginTime);
         expectedEndTime = loginTime.AddHours(settings.WorkHoursPerDay);
@@ -614,9 +701,315 @@ internal sealed class WorkWidgetWindow : Window
         attendance.SystemStartTime = systemStart;
 
         SaveSettings();
+        ApplyTheme();
         settingsPanel.Visibility = Visibility.Collapsed;
         ApplyEarningsVisibility();
         UpdateWidget();
+    }
+
+    private double CalculatePaidSeconds(DateTime start, DateTime end)
+    {
+        double elapsed = Math.Max(0, (end - start).TotalSeconds);
+        DateTime lunchStart;
+        DateTime lunchEnd;
+        if (!TryParseTimeOnDate(settings.LunchStartTime, start.Date, out lunchStart) ||
+            !TryParseTimeOnDate(settings.LunchEndTime, start.Date, out lunchEnd))
+        {
+            return elapsed;
+        }
+
+        if (lunchEnd <= lunchStart) lunchEnd = lunchEnd.AddDays(1);
+
+        DateTime overlapStart = start > lunchStart ? start : lunchStart;
+        DateTime overlapEnd = end < lunchEnd ? end : lunchEnd;
+        double lunchSeconds = Math.Max(0, (overlapEnd - overlapStart).TotalSeconds);
+        return Math.Max(0, elapsed - lunchSeconds);
+    }
+
+    private double CalculatePaidHoursPerDay(double hoursPerDay)
+    {
+        double lunchHours = CalculateLunchDurationHours(DateTime.Today);
+        return Math.Max(0.1, hoursPerDay - lunchHours);
+    }
+
+    private double CalculateLunchDurationHours(DateTime date)
+    {
+        DateTime lunchStart;
+        DateTime lunchEnd;
+        if (!TryParseTimeOnDate(settings.LunchStartTime, date, out lunchStart) ||
+            !TryParseTimeOnDate(settings.LunchEndTime, date, out lunchEnd))
+        {
+            return 0;
+        }
+
+        if (lunchEnd <= lunchStart) lunchEnd = lunchEnd.AddDays(1);
+        return Math.Max(0, (lunchEnd - lunchStart).TotalHours);
+    }
+
+    private T Theme<T>(T element, string role) where T : FrameworkElement
+    {
+        element.Tag = role;
+        themedElements.Add(element);
+        return element;
+    }
+
+    private void ApplyTheme()
+    {
+        ThemePalette palette = CurrentPalette();
+        foreach (FrameworkElement element in themedElements)
+        {
+            string role = element.Tag as string;
+            TextBlock text = element as TextBlock;
+            Border border = element as Border;
+            Control control = element as Control;
+
+            if (role == "Shell" && border != null)
+            {
+                border.Background = BrushFrom(palette.ShellBackground);
+                border.BorderBrush = BrushFrom(palette.Border);
+            }
+            else if (role == "Line" && border != null)
+            {
+                border.Background = BrushFrom(palette.Line);
+            }
+            else if (role == "PrimaryText" && text != null)
+            {
+                text.Foreground = BrushFrom(palette.PrimaryText);
+            }
+            else if (role == "SecondaryText" && control != null)
+            {
+                control.Foreground = BrushFrom(palette.SecondaryText);
+            }
+            else if (role == "SecondaryText" && text != null)
+            {
+                text.Foreground = BrushFrom(palette.SecondaryText);
+            }
+            else if (role == "MutedText" && text != null)
+            {
+                text.Foreground = BrushFrom(palette.MutedText);
+            }
+            else if (role == "IncomeText" && text != null)
+            {
+                text.Foreground = BrushFrom(palette.IncomeText);
+            }
+            else if (role == "Input" && control != null)
+            {
+                control.Background = BrushFrom(palette.InputBackground);
+                control.Foreground = BrushFrom(palette.PrimaryText);
+                control.BorderBrush = BrushFrom(palette.Border);
+                ComboBox comboBox = control as ComboBox;
+                if (comboBox != null)
+                {
+                    comboBox.Template = CreateComboBoxTemplate(palette);
+                    comboBox.ItemContainerStyle = CreateComboBoxItemStyle(palette);
+                }
+            }
+            else if (role == "IconButton" && control != null)
+            {
+                control.Foreground = BrushFrom(palette.PrimaryText);
+                control.Template = CreateIconButtonTemplate();
+            }
+        }
+
+        if (settingsButton != null) settingsButton.Content = OptionsIcon();
+        if (closeButton != null) closeButton.Content = CloseIcon();
+        if (earningsToggleButton != null) earningsToggleButton.Content = ChevronIcon(settings.EarningsCollapsed);
+        if (cancelButton != null) cancelButton.Template = CreateTextButtonTemplate(palette.ShellBackground, palette.ButtonHover, palette.ButtonPressed, palette.Border, palette.SecondaryText);
+        if (saveButton != null) saveButton.Template = CreateTextButtonTemplate(palette.SaveBackground, palette.SaveHover, palette.SavePressed, palette.SaveBackground, palette.SaveText);
+    }
+
+    private ControlTemplate CreateComboBoxTemplate(ThemePalette palette)
+    {
+        FrameworkElementFactory root = new FrameworkElementFactory(typeof(Grid));
+
+        FrameworkElementFactory toggle = new FrameworkElementFactory(typeof(ToggleButton));
+        toggle.Name = "DropDownToggle";
+        toggle.SetValue(ToggleButton.FocusableProperty, false);
+        toggle.SetValue(ToggleButton.ClickModeProperty, ClickMode.Press);
+        toggle.SetValue(ToggleButton.BackgroundProperty, BrushFrom(palette.InputBackground));
+        toggle.SetValue(ToggleButton.BorderBrushProperty, BrushFrom(palette.Border));
+        toggle.SetBinding(ToggleButton.IsCheckedProperty, new Binding("IsDropDownOpen") { RelativeSource = RelativeSource.TemplatedParent, Mode = BindingMode.TwoWay });
+        toggle.SetValue(ToggleButton.TemplateProperty, CreateComboBoxToggleTemplate(palette));
+        root.AppendChild(toggle);
+
+        FrameworkElementFactory presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.MarginProperty, new Thickness(8, 0, 28, 0));
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
+        presenter.SetValue(TextElement.ForegroundProperty, BrushFrom(palette.PrimaryText));
+        presenter.SetValue(ContentPresenter.RecognizesAccessKeyProperty, true);
+        presenter.SetBinding(ContentPresenter.ContentProperty, new Binding("SelectionBoxItem") { RelativeSource = RelativeSource.TemplatedParent });
+        root.AppendChild(presenter);
+
+        FrameworkElementFactory popup = new FrameworkElementFactory(typeof(Popup));
+        popup.Name = "PART_Popup";
+        popup.SetValue(Popup.AllowsTransparencyProperty, true);
+        popup.SetValue(Popup.PlacementProperty, PlacementMode.Bottom);
+        popup.SetValue(Popup.PopupAnimationProperty, PopupAnimation.Fade);
+        popup.SetBinding(Popup.IsOpenProperty, new Binding("IsDropDownOpen") { RelativeSource = RelativeSource.TemplatedParent });
+
+        FrameworkElementFactory dropdownBorder = new FrameworkElementFactory(typeof(Border));
+        dropdownBorder.SetValue(Border.BackgroundProperty, BrushFrom(palette.InputBackground));
+        dropdownBorder.SetValue(Border.BorderBrushProperty, BrushFrom(palette.Border));
+        dropdownBorder.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        dropdownBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+        dropdownBorder.SetBinding(FrameworkElement.MinWidthProperty, new Binding("ActualWidth") { RelativeSource = RelativeSource.TemplatedParent });
+
+        FrameworkElementFactory scrollViewer = new FrameworkElementFactory(typeof(ScrollViewer));
+        scrollViewer.SetValue(ScrollViewer.CanContentScrollProperty, true);
+        FrameworkElementFactory itemsPresenter = new FrameworkElementFactory(typeof(ItemsPresenter));
+        scrollViewer.AppendChild(itemsPresenter);
+        dropdownBorder.AppendChild(scrollViewer);
+        popup.AppendChild(dropdownBorder);
+        root.AppendChild(popup);
+
+        ControlTemplate template = new ControlTemplate(typeof(ComboBox));
+        template.VisualTree = root;
+        return template;
+    }
+
+    private ControlTemplate CreateComboBoxToggleTemplate(ThemePalette palette)
+    {
+        FrameworkElementFactory border = new FrameworkElementFactory(typeof(Border));
+        border.Name = "ToggleBorder";
+        border.SetValue(Border.BackgroundProperty, BrushFrom(palette.InputBackground));
+        border.SetValue(Border.BorderBrushProperty, BrushFrom(palette.Border));
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(3));
+
+        FrameworkElementFactory grid = new FrameworkElementFactory(typeof(Grid));
+        FrameworkElementFactory arrow = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path));
+        arrow.SetValue(System.Windows.Shapes.Path.WidthProperty, 7.0);
+        arrow.SetValue(System.Windows.Shapes.Path.HeightProperty, 4.0);
+        arrow.SetValue(System.Windows.Shapes.Path.HorizontalAlignmentProperty, HorizontalAlignment.Right);
+        arrow.SetValue(System.Windows.Shapes.Path.VerticalAlignmentProperty, VerticalAlignment.Center);
+        arrow.SetValue(System.Windows.Shapes.Path.MarginProperty, new Thickness(0, 0, 9, 0));
+        arrow.SetValue(System.Windows.Shapes.Path.FillProperty, BrushFrom(palette.MutedText));
+        arrow.SetValue(System.Windows.Shapes.Path.StretchProperty, Stretch.Uniform);
+        arrow.SetValue(System.Windows.Shapes.Path.DataProperty, Geometry.Parse("M 0 0 L 3.5 4 L 7 0 Z"));
+        grid.AppendChild(arrow);
+        border.AppendChild(grid);
+
+        ControlTemplate template = new ControlTemplate(typeof(ToggleButton));
+        template.VisualTree = border;
+
+        Trigger over = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        over.Setters.Add(new Setter(Border.BackgroundProperty, BrushFrom(palette.ButtonHover), "ToggleBorder"));
+        template.Triggers.Add(over);
+
+        return template;
+    }
+
+    private Style CreateComboBoxItemStyle(ThemePalette palette)
+    {
+        Style style = new Style(typeof(ComboBoxItem));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, BrushFrom(palette.InputBackground)));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, BrushFrom(palette.PrimaryText)));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(8, 4, 8, 4)));
+        style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+
+        Trigger highlighted = new Trigger { Property = ComboBoxItem.IsHighlightedProperty, Value = true };
+        highlighted.Setters.Add(new Setter(Control.BackgroundProperty, BrushFrom(palette.ButtonHover)));
+        highlighted.Setters.Add(new Setter(Control.ForegroundProperty, BrushFrom(palette.PrimaryText)));
+        style.Triggers.Add(highlighted);
+
+        Trigger selected = new Trigger { Property = ComboBoxItem.IsSelectedProperty, Value = true };
+        selected.Setters.Add(new Setter(Control.BackgroundProperty, BrushFrom(palette.ButtonPressed)));
+        selected.Setters.Add(new Setter(Control.ForegroundProperty, BrushFrom(palette.PrimaryText)));
+        style.Triggers.Add(selected);
+
+        return style;
+    }
+
+    private ThemePalette CurrentPalette()
+    {
+        bool dark = IsDarkTheme();
+        if (dark)
+        {
+            return new ThemePalette
+            {
+                ShellBackground = "#111827",
+                Border = "#374151",
+                Line = "#374151",
+                PrimaryText = "#F8FAFC",
+                SecondaryText = "#CBD5E1",
+                MutedText = "#94A3B8",
+                IncomeText = "#4ADE80",
+                Icon = "#B6BBCB",
+                InputBackground = "#1F2937",
+                ButtonBackground = "#111827",
+                ButtonHover = "#253244",
+                ButtonPressed = "#334155",
+                SaveBackground = "#F8FAFC",
+                SaveHover = "#E2E8F0",
+                SavePressed = "#CBD5E1",
+                SaveText = "#0F172A"
+            };
+        }
+
+        return new ThemePalette
+        {
+            ShellBackground = "#F8FAFC",
+            Border = "#C4CCD6",
+            Line = "#CBD5E1",
+            PrimaryText = "#0F172A",
+            SecondaryText = "#334155",
+            MutedText = "#64748B",
+            IncomeText = "#15803D",
+            Icon = "#B6BBCB",
+            InputBackground = "#FFFFFF",
+            ButtonBackground = "#F8FAFC",
+            ButtonHover = "#E2E8F0",
+            ButtonPressed = "#CBD5E1",
+            SaveBackground = "#0F172A",
+            SaveHover = "#1E293B",
+            SavePressed = "#334155",
+            SaveText = "#FFFFFF"
+        };
+    }
+
+    private bool IsDarkTheme()
+    {
+        string mode = NormalizeThemeMode(settings == null ? null : settings.ThemeMode);
+        if (mode == "dark") return true;
+        if (mode == "light") return false;
+
+        try
+        {
+            object value = Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1);
+            return Convert.ToInt32(value, CultureInfo.InvariantCulture) == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string NormalizeThemeMode(string mode)
+    {
+        mode = (mode ?? "").Trim().ToLowerInvariant();
+        return mode == "light" || mode == "dark" ? mode : "system";
+    }
+
+    private void SelectTheme(string mode)
+    {
+        mode = NormalizeThemeMode(mode);
+        foreach (object item in themeBox.Items)
+        {
+            ComboBoxItem comboItem = item as ComboBoxItem;
+            if (comboItem != null && (comboItem.Tag as string) == mode)
+            {
+                themeBox.SelectedItem = comboItem;
+                return;
+            }
+        }
+        themeBox.SelectedIndex = 0;
+    }
+
+    private string SelectedThemeMode()
+    {
+        ComboBoxItem item = themeBox.SelectedItem as ComboBoxItem;
+        return NormalizeThemeMode(item == null ? null : item.Tag as string);
     }
 
     private Settings ReadSettings()
@@ -631,7 +1024,13 @@ internal sealed class WorkWidgetWindow : Window
         try
         {
             Settings loaded = serializer.Deserialize<Settings>(File.ReadAllText(settingsPath, Encoding.UTF8));
-            return loaded ?? defaults;
+            if (loaded == null) return defaults;
+            if (string.IsNullOrWhiteSpace(loaded.ThemeMode)) loaded.ThemeMode = defaults.ThemeMode;
+            if (loaded.WorkDaysYear <= 0) loaded.WorkDaysYear = DateTime.Today.Year;
+            if (loaded.WorkDaysPerYear <= 0) loaded.WorkDaysPerYear = defaults.WorkDaysPerYear;
+            loaded.LunchStartTime = NormalizeTimeText(loaded.LunchStartTime, defaults.LunchStartTime);
+            loaded.LunchEndTime = NormalizeTimeText(loaded.LunchEndTime, defaults.LunchEndTime);
+            return loaded;
         }
         catch
         {
@@ -643,6 +1042,24 @@ internal sealed class WorkWidgetWindow : Window
     private void SaveSettings()
     {
         File.WriteAllText(settingsPath, serializer.Serialize(settings), new UTF8Encoding(true));
+    }
+
+    private void EnsureWorkDaysForCurrentYear()
+    {
+        int currentYear = DateTime.Today.Year;
+        if (settings.WorkDaysYear == currentYear)
+        {
+            return;
+        }
+
+        settings.WorkDaysYear = currentYear;
+        settings.WorkDaysPerYear = Settings.CountWeekdays(currentYear);
+        SaveSettings();
+
+        if (daysBox != null && settingsPanel != null && settingsPanel.Visibility == Visibility.Visible)
+        {
+            daysBox.Text = settings.WorkDaysPerYear.ToString("0", CultureInfo.InvariantCulture);
+        }
     }
 
     private string ResolveAppDir()
@@ -820,6 +1237,38 @@ internal sealed class WorkWidgetWindow : Window
                 return DateTime.Today.AddHours(parsed.Hour).AddMinutes(parsed.Minute);
         }
         return DateTime.Today.AddHours(fallback.Hour).AddMinutes(fallback.Minute);
+    }
+
+    private static bool TryParseTimeOnDate(string text, DateTime date, out DateTime value)
+    {
+        DateTime parsed;
+        foreach (string format in new[] { "H:mm", "HH:mm" })
+        {
+            if (DateTime.TryParseExact((text ?? "").Trim(), format, CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
+            {
+                value = date.AddHours(parsed.Hour).AddMinutes(parsed.Minute);
+                return true;
+            }
+        }
+
+        value = date;
+        return false;
+    }
+
+    private static string NormalizeTimeText(string text, string fallback)
+    {
+        DateTime parsed;
+        if (TryParseTimeOnDate(text, DateTime.Today, out parsed))
+        {
+            return parsed.ToString("HH:mm");
+        }
+
+        if (TryParseTimeOnDate(fallback, DateTime.Today, out parsed))
+        {
+            return parsed.ToString("HH:mm");
+        }
+
+        return "12:00";
     }
 
     private static string FormatWon(double value)
