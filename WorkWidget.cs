@@ -1,12 +1,15 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using Microsoft.Win32;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
@@ -23,7 +26,12 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
-        new Application().Run(new WorkWidgetWindow());
+        bool createdNew;
+        using (Mutex mutex = new Mutex(true, @"Local\DeviljjuWorkTimeWidget", out createdNew))
+        {
+            if (!createdNew) return;
+            new Application().Run(new WorkWidgetWindow());
+        }
     }
 }
 
@@ -34,6 +42,7 @@ internal sealed class Settings
     public double WorkDaysPerYear { get; set; }
     public int WorkDaysYear { get; set; }
     public bool Topmost { get; set; }
+    public bool AutoStart { get; set; }
     public bool EarningsCollapsed { get; set; }
     public string ThemeMode { get; set; }
     public string LunchStartTime { get; set; }
@@ -49,6 +58,7 @@ internal sealed class Settings
             WorkDaysPerYear = CountWeekdays(year),
             WorkDaysYear = year,
             Topmost = true,
+            AutoStart = true,
             EarningsCollapsed = true,
             ThemeMode = "system",
             LunchStartTime = "12:00",
@@ -110,6 +120,7 @@ internal sealed class WorkWidgetWindow : Window
     private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
     private readonly DispatcherTimer timer = new DispatcherTimer();
     private readonly System.Windows.Forms.NotifyIcon notifyIcon = new System.Windows.Forms.NotifyIcon();
+    private readonly System.Windows.Forms.ContextMenuStrip trayMenu = new System.Windows.Forms.ContextMenuStrip();
 
     private Settings settings;
     private AttendanceRecord attendance;
@@ -118,6 +129,7 @@ internal sealed class WorkWidgetWindow : Window
     private DateTime expectedEndTime;
     private bool departureAlarmShown;
     private DateTime departureAlarmDate;
+    private bool allowExit;
 
     private readonly List<FrameworkElement> themedElements = new List<FrameworkElement>();
     private Border shell;
@@ -138,11 +150,12 @@ internal sealed class WorkWidgetWindow : Window
     private TextBox lunchStartBox;
     private TextBox lunchEndBox;
     private CheckBox topmostBox;
+    private CheckBox autoStartBox;
     private ComboBox themeBox;
 
     private const double ExpandedHeightValue = 188;
     private const double CollapsedHeightValue = 150;
-    private const double SettingsHeightValue = 424;
+    private const double SettingsHeightValue = 460;
 
     public WorkWidgetWindow()
     {
@@ -152,6 +165,7 @@ internal sealed class WorkWidgetWindow : Window
 
         settings = ReadSettings();
         EnsureWorkDaysForCurrentYear();
+        ApplyAutoStartSetting();
         settings.EarningsCollapsed = true;
         detectedLoginTime = GetSessionLoginTime();
         attendance = GetAttendanceRecord(detectedLoginTime, settings.WorkHoursPerDay);
@@ -170,11 +184,15 @@ internal sealed class WorkWidgetWindow : Window
             notifyIcon.Icon = System.Drawing.SystemIcons.Information;
         }
         notifyIcon.Text = "출근 퇴근 연봉 위젯";
+        ConfigureTrayIcon();
         notifyIcon.Visible = true;
+        Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        Closing += OnWindowClosing;
         Closed += delegate
         {
             notifyIcon.Visible = false;
             notifyIcon.Dispose();
+            trayMenu.Dispose();
         };
 
         ApplyEarningsVisibility();
@@ -194,7 +212,7 @@ internal sealed class WorkWidgetWindow : Window
         AllowsTransparency = true;
         Background = Brushes.Transparent;
         Topmost = settings.Topmost;
-        ShowInTaskbar = true;
+        ShowInTaskbar = false;
 
         shell = Theme(new Border
         {
@@ -231,18 +249,13 @@ internal sealed class WorkWidgetWindow : Window
 
         settingsButton = IconButton(null, "설정");
         settingsButton.Content = OptionsIcon();
-        settingsButton.Click += delegate
-        {
-            SyncSettingsFields();
-            Height = SettingsHeightValue;
-            settingsPanel.Visibility = Visibility.Visible;
-        };
+        settingsButton.Click += delegate { OpenSettings(); };
         Grid.SetColumn(settingsButton, 1);
         title.Children.Add(settingsButton);
 
-        closeButton = IconButton(null, "닫기");
+        closeButton = IconButton(null, "트레이로 숨기기");
         closeButton.Content = CloseIcon();
-        closeButton.Click += delegate { Close(); };
+        closeButton.Click += delegate { HideWidget(); };
         Grid.SetColumn(closeButton, 2);
         title.Children.Add(closeButton);
 
@@ -318,6 +331,7 @@ internal sealed class WorkWidgetWindow : Window
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
         grid.RowDefinitions.Add(new RowDefinition());
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
 
@@ -350,8 +364,18 @@ internal sealed class WorkWidgetWindow : Window
         Grid.SetRow(topmostBox, 8);
         grid.Children.Add(topmostBox);
 
+        autoStartBox = new CheckBox
+        {
+            Content = "Windows 시작 시 실행",
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 8, 0, 0)
+        };
+        Theme(autoStartBox, "SecondaryText");
+        Grid.SetRow(autoStartBox, 9);
+        grid.Children.Add(autoStartBox);
+
         StackPanel buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        Grid.SetRow(buttons, 9);
+        Grid.SetRow(buttons, 10);
         grid.Children.Add(buttons);
         cancelButton = new Button { Content = "취소", Width = 72, Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand };
         cancelButton.Click += delegate
@@ -676,6 +700,7 @@ internal sealed class WorkWidgetWindow : Window
         lunchStartBox.Text = settings.LunchStartTime;
         lunchEndBox.Text = settings.LunchEndTime;
         topmostBox.IsChecked = settings.Topmost;
+        autoStartBox.IsChecked = settings.AutoStart;
         SelectTheme(settings.ThemeMode);
     }
 
@@ -686,6 +711,7 @@ internal sealed class WorkWidgetWindow : Window
         settings.WorkDaysPerYear = Math.Max(1, ParseDouble(daysBox.Text, 260));
         settings.WorkDaysYear = DateTime.Today.Year;
         settings.Topmost = topmostBox.IsChecked == true;
+        settings.AutoStart = autoStartBox.IsChecked == true;
         settings.ThemeMode = SelectedThemeMode();
         settings.LunchStartTime = NormalizeTimeText(lunchStartBox.Text, settings.LunchStartTime);
         settings.LunchEndTime = NormalizeTimeText(lunchEndBox.Text, settings.LunchEndTime);
@@ -701,6 +727,7 @@ internal sealed class WorkWidgetWindow : Window
         attendance.SystemStartTime = systemStart;
 
         SaveSettings();
+        ApplyAutoStartSetting();
         ApplyTheme();
         settingsPanel.Visibility = Visibility.Collapsed;
         ApplyEarningsVisibility();
@@ -1023,8 +1050,11 @@ internal sealed class WorkWidgetWindow : Window
 
         try
         {
-            Settings loaded = serializer.Deserialize<Settings>(File.ReadAllText(settingsPath, Encoding.UTF8));
+            string json = File.ReadAllText(settingsPath, Encoding.UTF8);
+            Settings loaded = serializer.Deserialize<Settings>(json);
             if (loaded == null) return defaults;
+            Dictionary<string, object> raw = serializer.Deserialize<Dictionary<string, object>>(json);
+            if (raw == null || !raw.ContainsKey("AutoStart")) loaded.AutoStart = defaults.AutoStart;
             if (string.IsNullOrWhiteSpace(loaded.ThemeMode)) loaded.ThemeMode = defaults.ThemeMode;
             if (loaded.WorkDaysYear <= 0) loaded.WorkDaysYear = DateTime.Today.Year;
             if (loaded.WorkDaysPerYear <= 0) loaded.WorkDaysPerYear = defaults.WorkDaysPerYear;
@@ -1042,6 +1072,111 @@ internal sealed class WorkWidgetWindow : Window
     private void SaveSettings()
     {
         File.WriteAllText(settingsPath, serializer.Serialize(settings), new UTF8Encoding(true));
+    }
+
+    private void ApplyAutoStartSetting()
+    {
+        string shortcutPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Work Time Widget.lnk");
+        try
+        {
+            if (settings.AutoStart)
+            {
+                CreateStartupShortcut(shortcutPath);
+            }
+            else if (File.Exists(shortcutPath))
+            {
+                File.Delete(shortcutPath);
+            }
+        }
+        catch { }
+    }
+
+    private void CreateStartupShortcut(string shortcutPath)
+    {
+        string executable = Process.GetCurrentProcess().MainModule.FileName;
+        Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+        object shell = Activator.CreateInstance(shellType);
+        object shortcut = null;
+        try
+        {
+            shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { shortcutPath });
+            Type shortcutType = shortcut.GetType();
+            shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { executable });
+            shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, new object[] { Path.GetDirectoryName(executable) });
+            shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, new object[] { executable + ",0" });
+            shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "출근 퇴근 연봉 위젯" });
+            shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+        }
+        finally
+        {
+            if (shortcut != null && Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+            if (shell != null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+        }
+    }
+
+    private void ConfigureTrayIcon()
+    {
+        trayMenu.ShowImageMargin = false;
+
+        System.Windows.Forms.ToolStripMenuItem openItem = new System.Windows.Forms.ToolStripMenuItem("위젯 열기");
+        openItem.Font = new System.Drawing.Font(openItem.Font, System.Drawing.FontStyle.Bold);
+        openItem.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { ShowWidget(); })); };
+        trayMenu.Items.Add(openItem);
+
+        System.Windows.Forms.ToolStripMenuItem settingsItem = new System.Windows.Forms.ToolStripMenuItem("설정");
+        settingsItem.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { OpenSettings(); })); };
+        trayMenu.Items.Add(settingsItem);
+        trayMenu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
+
+        System.Windows.Forms.ToolStripMenuItem exitItem = new System.Windows.Forms.ToolStripMenuItem("종료");
+        exitItem.Click += delegate { Dispatcher.BeginInvoke(new Action(delegate { ExitApplication(); })); };
+        trayMenu.Items.Add(exitItem);
+
+        notifyIcon.ContextMenuStrip = trayMenu;
+        notifyIcon.MouseClick += delegate(object sender, System.Windows.Forms.MouseEventArgs e)
+        {
+            if (e.Button == System.Windows.Forms.MouseButtons.Left)
+            {
+                Dispatcher.BeginInvoke(new Action(delegate { ShowWidget(); }));
+            }
+        };
+        notifyIcon.BalloonTipClicked += delegate { Dispatcher.BeginInvoke(new Action(delegate { ShowWidget(); })); };
+    }
+
+    private void ShowWidget()
+    {
+        if (!IsVisible) Show();
+        WindowState = WindowState.Normal;
+        Activate();
+        Topmost = settings.Topmost;
+    }
+
+    private void OpenSettings()
+    {
+        ShowWidget();
+        SyncSettingsFields();
+        Height = SettingsHeightValue;
+        settingsPanel.Visibility = Visibility.Visible;
+    }
+
+    private void HideWidget()
+    {
+        Hide();
+    }
+
+    private void OnWindowClosing(object sender, CancelEventArgs e)
+    {
+        if (allowExit) return;
+        e.Cancel = true;
+        HideWidget();
+    }
+
+    private void ExitApplication()
+    {
+        allowExit = true;
+        timer.Stop();
+        Close();
+        Application.Current.Shutdown();
     }
 
     private void EnsureWorkDaysForCurrentYear()
